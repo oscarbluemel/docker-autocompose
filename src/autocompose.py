@@ -3,6 +3,7 @@ import argparse
 import datetime
 import re
 import sys
+import os
 
 from collections import OrderedDict
 
@@ -27,6 +28,11 @@ def shell_escape_string(input_string):
 def list_container_names():
     c = docker.from_env()
     return [container.name for container in c.containers.list(all=True)]
+
+
+def list_container_ids():
+    c = docker.from_env()
+    return [container.id for container in c.containers.list(all=True)]
 
 
 def list_network_names():
@@ -96,7 +102,23 @@ def main():
         type=str,
         help="Filter containers by regex",
     )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=str,
+        default="docker-comp-confs",
+        help="Output directory for compose files",
+    )
+    parser.add_argument(
+        "--export-all",
+        action="store_true",
+        help="Export all containers to separate files in the output directory",
+    )
     args = parser.parse_args()
+
+    if args.export_all:
+        export_all_containers(args)
+        return
 
     container_names = args.cnames
 
@@ -135,6 +157,44 @@ def main():
     render(struct, args, networks, volumes)
 
 
+def export_all_containers(args):
+    """Export all containers to separate compose files"""
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    print(f"Exporting all containers to {args.output_dir}/")
+    
+    # Get all container IDs
+    container_ids = list_container_ids()
+    
+    # Process each container
+    for container_id in container_ids:
+        c = docker.from_env()
+        container = c.containers.get(container_id)
+        container_name = container.name
+        
+        print(f"Processing container {container_name} ({container_id[:12]})...")
+        
+        # Generate compose file for the container
+        cfile, networks, volumes = generate(container_id, createvolumes=args.createvolumes)
+        
+        # Prepare the output structure
+        output = {"version": '3.6', "services": cfile}
+        if networks is not None and len(networks) > 0:
+            output["networks"] = networks
+        if volumes is not None and len(volumes) > 0:
+            output["volumes"] = volumes
+        
+        # Write to file
+        output_file = os.path.join(args.output_dir, f"compose-{container_name}.yml")
+        with open(output_file, 'w') as f:
+            pyaml.dump(OrderedDict(output), f, string_val_style='"')
+        
+        print(f"Created {output_file}")
+    
+    print(f"All docker-compose files have been generated in the {args.output_dir} directory.")
+
+
 def render(struct, args, networks, volumes):
     # Render yaml file
     if args.version == 1:
@@ -155,7 +215,7 @@ def generate(cname, createvolumes=False):
     c = docker.from_env()
 
     try:
-        cid = [x.short_id for x in c.containers.list(all=True) if cname == x.name or x.short_id in cname][0]
+        cid = [x.short_id for x in c.containers.list(all=True) if cname == x.name or x.short_id in cname or x.id in cname][0]
     except IndexError:
         print("That container is not available.", file=sys.stderr)
         sys.exit(1)
